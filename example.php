@@ -52,10 +52,10 @@ function display($diff) {
 
 $start = microtime(true);
 
-// $diff1 = new GitDiff(file_get_contents('sample1.diff'));
+$diff1 = new GitDiff(file_get_contents('sample1.diff'));
 $diff2 = new GitDiff(file_get_contents('sample2.diff'));
 
-// display($diff1);
+display($diff1);
 display($diff2);
 
 $time = microtime(true) - $start;

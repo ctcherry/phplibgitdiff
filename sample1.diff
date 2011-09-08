@@ -1,930 +1,169 @@
-diff --git a/lib/Git.class.php b/lib/Git.class.php
-deleted file mode 100644
-index 5c39d38..0000000
---- a/lib/Git.class.php
-+++ /dev/null
-@@ -1,407 +0,0 @@
--<?php
--/*
-- * Copyright (C) 2008, 2009 Patrik Fimml
-- *
-- * This file is part of glip.
-- *
-- * glip is free software: you can redistribute it and/or modify
-- * it under the terms of the GNU General Public License as published by
-- * the Free Software Foundation, either version 2 of the License, or
-- * (at your option) any later version.
-- *
-- * glip is distributed in the hope that it will be useful,
-- * but WITHOUT ANY WARRANTY; without even the implied warranty of
-- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-- * GNU General Public License for more details.
-- *
-- * You should have received a copy of the GNU General Public License
-- * along with glip.  If not, see <http://www.gnu.org/licenses/>.
-- */
--
--class Git
--{
--    public $dir;
--
--    const OBJ_NONE = 0;
--    const OBJ_COMMIT = 1;
--    const OBJ_TREE = 2;
--    const OBJ_BLOB = 3;
--    const OBJ_TAG = 4;
--    const OBJ_OFS_DELTA = 6;
--    const OBJ_REF_DELTA = 7;
--
--    static public function getTypeID($name)
--    {
--        if ($name == 'commit')
--            return Git::OBJ_COMMIT;
--        else if ($name == 'tree')
--            return Git::OBJ_TREE;
--        else if ($name == 'blob')
--            return Git::OBJ_BLOB;
--        else if ($name == 'tag')
--            return Git::OBJ_TAG;
--        throw new Exception(sprintf('Git: unknown type name: %s', $name));
--    }
--
--    static public function getTypeName($type)
--    {
--        if ($type == Git::OBJ_COMMIT)
--            return 'commit';
--        else if ($type == Git::OBJ_TREE)
--            return 'tree';
--        else if ($type == Git::OBJ_BLOB)
--            return 'blob';
--        else if ($type == Git::OBJ_TAG)
--            return 'tag';
--        throw new Exception(sprintf('Git: no string representation of type %d', $type));
--    }
--
--    public function __construct($dir)
--    {
--        $this->dir = realpath($dir);
--        if ($this->dir === FALSE || !@is_dir($this->dir))
--            throw new Exception(sprintf('Git: not a directory: %s', $dir));
--
--        $this->packs = array();
--        $dh = opendir(sprintf('%s/objects/pack', $this->dir));
--        if ($dh !== FALSE) {
--            while (($entry = readdir($dh)) !== FALSE)
--                if (preg_match('#^pack-([0-9a-fA-F]{40})\.idx$#', $entry, $m))
--                    $this->packs[] = Git_Helper::sha1_bin($m[1]);
--            closedir($dh);
--        }
--    }
--
--    /**
--     * @brief Tries to find $object_name in the fanout table in $f at $offset.
--     *
--     * @returns array The range where the object can be located (first possible
--     * location and past-the-end location)
--     */
--    protected function readFanout($f, $object_name, $offset)
--    {
--        if ($object_name{0} == "\x00")
--        {
--            $cur = 0;
--            fseek($f, $offset);
--            $after = Git_Helper::fuint32($f);
--        }
--        else
--        {
--            fseek($f, $offset + (ord($object_name{0}) - 1)*4);
--            $cur = Git_Helper::fuint32($f);
--            $after = Git_Helper::fuint32($f);
--        }
--
--        return array($cur, $after);
--    }
--
--    /**
--     * @brief Try to find an object in a pack.
--     *
--     * @param $object_name (string) name of the object (binary SHA1)
--     * @returns (array) an array consisting of the name of the pack (string) and
--     * the byte offset inside it, or NULL if not found
--     */
--    protected function findPackedObject($object_name)
--    {
--        foreach ($this->packs as $pack_name)
--        {
--            $index = fopen(sprintf('%s/objects/pack/pack-%s.idx', $this->dir, Git_Helper::sha1_hex($pack_name)), 'rb');
--            flock($index, LOCK_SH);
--
--            /* check version */
--            $magic = fread($index, 4);
--            if ($magic != "\xFFtOc")
--            {
--                /* version 1 */
--                /* read corresponding fanout entry */
--                list($cur, $after) = $this->readFanout($index, $object_name, 0);
--
--                $n = $after-$cur;
--                if ($n == 0)
--                    continue;
--
--                /*
--                 * TODO: do a binary search in [$offset, $offset+24*$n)
--                 */
--                fseek($index, 4*256 + 24*$cur);
--                for ($i = 0; $i < $n; $i++)
--                {
--                    $off = Git_Helper::fuint32($index);
--                    $name = fread($index, 20);
--                    if ($name == $object_name)
--                    {
--                        /* we found the object */
--                        fclose($index);
--                        return array($pack_name, $off);
--                    }
--                }
--            }
--            else
--            {
--                /* version 2+ */
--                $version = Git_Helper::fuint32($index);
--                if ($version == 2)
--                {
--                    list($cur, $after) = $this->readFanout($index, $object_name, 8);
--
--                    if ($cur == $after)
--                        continue;
--
--                    fseek($index, 8 + 4*255);
--                    $total_objects = Git_Helper::fuint32($index);
--
--                    /* look up sha1 */
--                    fseek($index, 8 + 4*256 + 20*$cur);
--                    for ($i = $cur; $i < $after; $i++)
--                    {
--                        $name = fread($index, 20);
--                        if ($name == $object_name)
--                            break;
--                    }
--                    if ($i == $after)
--                        continue;
--
--                    fseek($index, 8 + 4*256 + 24*$total_objects + 4*$i);
--                    $off = Git_Helper::fuint32($index);
--                    if ($off & 0x80000000)
--                    {
--                        /* packfile > 2 GB. Gee, you really want to handle this
--                         * much data with PHP?
--                         */
--                        throw new Exception('Git: 64-bit packfiles offsets not implemented');
--                    }
--
--                    fclose($index);
--                    return array($pack_name, $off);
--                }
--                else
--                    throw new Exception('Git: unsupported pack index format');
--            }
--            fclose($index);
--        }
--        /* not found */
--        return NULL;
--    }
--
--    /**
--     * @brief Apply the git delta $delta to the byte sequence $base.
--     *
--     * @param $delta (string) the delta to apply
--     * @param $base (string) the sequence to patch
--     * @returns (string) the patched byte sequence
--     */
--    protected function applyDelta($delta, $base)
--    {
--        $pos = 0;
--
--        $base_size = Git_Helper::git_varint($delta, $pos);
--        $result_size = Git_Helper::git_varint($delta, $pos);
--
--        $r = '';
--        while ($pos < strlen($delta))
--        {
--            $opcode = ord($delta{$pos++});
--            if ($opcode & 0x80)
--            {
--                /* copy a part of $base */
--                $off = 0;
--                if ($opcode & 0x01) $off = ord($delta{$pos++});
--                if ($opcode & 0x02) $off |= ord($delta{$pos++}) <<  8;
--                if ($opcode & 0x04) $off |= ord($delta{$pos++}) << 16;
--                if ($opcode & 0x08) $off |= ord($delta{$pos++}) << 24;
--                $len = 0;
--                if ($opcode & 0x10) $len = ord($delta{$pos++});
--                if ($opcode & 0x20) $len |= ord($delta{$pos++}) <<  8;
--                if ($opcode & 0x40) $len |= ord($delta{$pos++}) << 16;
--                if ($len == 0) $len = 0x10000;
--                $r .= substr($base, $off, $len);
--            }
--            else
--            {
--                /* take the next $opcode bytes as they are */
--                $r .= substr($delta, $pos, $opcode);
--                $pos += $opcode;
--            }
--        }
--        return $r;
--    }
--
--    /**
--     * @brief Unpack an object from a pack.
--     *
--     * @param $pack (resource) open .pack file
--     * @param $object_offset (integer) offset of the object in the pack
--     * @returns (array) an array consisting of the object type (int) and the
--     * binary representation of the object (string)
--     */
--    protected function unpackObject($pack, $object_offset)
--    {
--        fseek($pack, $object_offset);
--
--        /* read object header */
--        $c = ord(fgetc($pack));
--        $type = ($c >> 4) & 0x07;
--        $size = $c & 0x0F;
--        for ($i = 4; $c & 0x80; $i += 7)
--        {
--            $c = ord(fgetc($pack));
--            $size |= (($c & 0x7F) << $i);
--        }
--
--        /* compare sha1_file.c:1608 unpack_entry */
--        if ($type == Git::OBJ_COMMIT || $type == Git::OBJ_TREE || $type == Git::OBJ_BLOB || $type == Git::OBJ_TAG)
--        {
--            /*
--             * We don't know the actual size of the compressed
--             * data, so we'll assume it's less than
--             * $object_size+512.
--             *
--             * FIXME use PHP stream filter API as soon as it behaves
--             * consistently
--             */
--            $data = gzuncompress(fread($pack, $size+512), $size);
--        }
--        else if ($type == Git::OBJ_OFS_DELTA)
--        {
--            /* 20 = maximum varint length for offset */
--            $buf = fread($pack, $size+512+20);
--
--            /*
--             * contrary to varints in other places, this one is big endian
--             * (and 1 is added each turn)
--             * see sha1_file.c (get_delta_base)
--             */
--            $pos = 0;
--            $offset = -1;
--            do
--            {
--                $offset++;
--                $c = ord($buf{$pos++});
--                $offset = ($offset << 7) + ($c & 0x7F);
--            }
--            while ($c & 0x80);
--
--            $delta = gzuncompress(substr($buf, $pos), $size);
--            unset($buf);
--
--            $base_offset = $object_offset - $offset;
--            assert($base_offset >= 0);
--            list($type, $base) = $this->unpackObject($pack, $base_offset);
--
--            $data = $this->applyDelta($delta, $base);
--        }
--        else if ($type == Git::OBJ_REF_DELTA)
--        {
--            $base_name = fread($pack, 20);
--            list($type, $base) = $this->getRawObject($base_name);
--
--            // $size is the length of the uncompressed delta
--            $delta = gzuncompress(fread($pack, $size+512), $size);
--
--            $data = $this->applyDelta($delta, $base);
--        }
--        else
--            throw new Exception(sprintf('Git: object of unknown type %d', $type));
--
--        return array($type, $data);
--    }
--
--    /**
--     * @brief Fetch an object in its binary representation by name.
--     *
--     * Throws an exception if the object cannot be found.
--     *
--     * @param $object_name (string) name of the object (binary SHA1)
--     * @returns (array) an array consisting of the object type (int) and the
--     * binary representation of the object (string)
--     */
--    protected function getRawObject($object_name)
--    {
--        static $cache = array();
--        /* FIXME allow limiting the cache to a certain size */
--
--        if (isset($cache[$object_name]))
--            return $cache[$object_name];
--        $sha1 = Git_Helper::sha1_hex($object_name);
--        $path = sprintf('%s/objects/%s/%s', $this->dir, substr($sha1, 0, 2), substr($sha1, 2));
--        if (file_exists($path))
--        {
--            list($hdr, $object_data) = explode("\0", gzuncompress(file_get_contents($path)), 2);
--
--            sscanf($hdr, "%s %d", $type, $object_size);
--            $object_type = Git::getTypeID($type);
--            $r = array($object_type, $object_data);
--        }
--        else if ($x = $this->findPackedObject($object_name))
--        {
--            list($pack_name, $object_offset) = $x;
--
--            $pack = fopen(sprintf('%s/objects/pack/pack-%s.pack', $this->dir, Git_Helper::sha1_hex($pack_name)), 'rb');
--            flock($pack, LOCK_SH);
--
--            /* check magic and version */
--            $magic = fread($pack, 4);
--            $version = Git_Helper::fuint32($pack);
--            if ($magic != 'PACK' || $version != 2)
--                throw new Exception('Git: unsupported pack format');
--
--            $r = $this->unpackObject($pack, $object_offset);
--            fclose($pack);
--        }
--        else
--            throw new Exception(sprintf('Git: object not found: %s', Git_Helper::sha1_hex($object_name)));
--        $cache[$object_name] = $r;
--        return $r;
--    }
--
--    /**
--     * @brief Fetch an object in its PHP representation.
--     *
--     * @param $name (string) name of the object (binary SHA1)
--     * @returns (Git_Object) the object
--     */
--    public function getObject($name)
--    {
--        list($type, $data) = $this->getRawObject($name);
--        $object = Git_Object::create($this, $type);
--        $object->unserialize($data);
--        assert($name == $object->getName());
--        return $object;
--    }
--
--    /**
--     * @brief Look up a branch.
--     *
--     * @param $branch (string) The branch to look up, defaulting to @em master.
--     * @returns (string) The tip of the branch (binary sha1).
--     */
--    public function getTip($branch='master')
--    {
--        $subpath = sprintf('refs/heads/%s', $branch);
--        $path = sprintf('%s/%s', $this->dir, $subpath);
--        if (file_exists($path))
--            return Git_Helper::sha1_bin(file_get_contents($path));
--        $path = sprintf('%s/packed-refs', $this->dir);
--        if (file_exists($path))
--        {
--            $head = NULL;
--            $f = fopen($path, 'rb');
--            flock($f, LOCK_SH);
--            while ($head === NULL && ($line = fgets($f)) !== FALSE)
--            {
--                if ($line{0} == '#')
--                    continue;
--                $parts = explode(' ', trim($line));
--                if (count($parts) == 2 && $parts[1] == $subpath)
--                    $head = Git_Helper::sha1_bin($parts[0]);
--            }
--            fclose($f);
--            if ($head !== NULL)
--                return $head;
--        }
--        throw new Exception(sprintf('Git: no such branch: %s', $branch));
--    }
--}
--
-diff --git a/lib/Git/Blob.class.php b/lib/Git/Blob.class.php
-index bf23aea..e5141d2 100644
---- a/lib/Git/Blob.class.php
-+++ b/lib/Git/Blob.class.php
-@@ -27,7 +27,7 @@ class Git_Blob extends Git_Object
+diff --git a/activerecord/CHANGELOG b/activerecord/CHANGELOG
+index 700e11f..143de81 100644
+--- a/activerecord/CHANGELOG
++++ b/activerecord/CHANGELOG
+@@ -1,4 +1,8 @@
+-*Rails 3.2.0 (unreleased)*
++Wed Sep  7 15:25:02 2011  Aaron Patterson <aaron@tenderlovemaking.com>
++
++	* lib/active_record/connection_adapters/mysql_adapter.rb: LRU cache
++	  keys are per process id.
++	* lib/active_record/connection_adapters/sqlite_adapter.rb: ditto
  
-     public function __construct($repo)
-     {
--        parent::__construct($repo, Git::OBJ_BLOB);
-+        parent::__construct($repo, Git_Repo::OBJ_BLOB);
-     }
+ * Support bulk change_table in mysql2 adapter, as well as the mysql one. [Jon Leighton]
  
-     public function _unserialize($data)
-diff --git a/lib/Git/Commit.class.php b/lib/Git/Commit.class.php
-index b293ec1..e0395ca 100644
---- a/lib/Git/Commit.class.php
-+++ b/lib/Git/Commit.class.php
-@@ -54,7 +54,7 @@ class Git_Commit extends Git_Object
+diff --git a/activerecord/lib/active_record/connection_adapters/mysql_adapter.rb b/activerecord/lib/active_record/connection_adapters/mysql_adapter.rb
+index 73e3afe..a1824fe 100644
+--- a/activerecord/lib/active_record/connection_adapters/mysql_adapter.rb
++++ b/activerecord/lib/active_record/connection_adapters/mysql_adapter.rb
+@@ -94,27 +94,32 @@ module ActiveRecord
+       class StatementPool < ConnectionAdapters::StatementPool
+         def initialize(connection, max = 1000)
+           super
+-          @cache = {}
++          @cache = Hash.new { |h,pid| h[pid] = {} }
+         end
  
-     public function __construct($repo)
-     {
--        parent::__construct($repo, Git::OBJ_COMMIT);
-+        parent::__construct($repo, Git_Repo::OBJ_COMMIT);
-     }
+-        def each(&block); @cache.each(&block); end
+-        def key?(key);    @cache.key?(key); end
+-        def [](key);      @cache[key]; end
+-        def length;       @cache.length; end
+-        def delete(key);  @cache.delete(key); end
++        def each(&block); cache.each(&block); end
++        def key?(key);    cache.key?(key); end
++        def [](key);      cache[key]; end
++        def length;       cache.length; end
++        def delete(key);  cache.delete(key); end
  
-     public function _unserialize($data)
-diff --git a/lib/Git/Object.class.php b/lib/Git/Object.class.php
-index 9f92773..b957982 100644
---- a/lib/Git/Object.class.php
-+++ b/lib/Git/Object.class.php
-@@ -37,8 +37,8 @@ class Git_Object
-     /**
-      * @brief Get the object's type.
-      *
--     * @returns (integer) One of Git::OBJ_COMMIT, Git::OBJ_TREE or
--     * GIT::OBJ_BLOB.
-+     * @returns (integer) One of Git_Repo::OBJ_COMMIT, Git_Repo::OBJ_TREE or
-+     * Git_Repo::OBJ_BLOB.
-      */
-     public function getType() { return $this->type; }
+         def []=(sql, key)
+-          while @max <= @cache.size
+-            @cache.shift.last[:stmt].close
++          while @max <= cache.size
++            cache.shift.last[:stmt].close
+           end
+-          @cache[sql] = key
++          cache[sql] = key
+         end
  
-@@ -46,17 +46,17 @@ class Git_Object
-      * @brief Create a Git_Object of the specified type.
-      *
-      * @param $repo (Git) The repository the object belongs to.
--     * @param $type (integer) Object type (one of Git::OBJ_COMMIT,
--     * Git::OBJ_TREE, Git::OBJ_BLOB).
-+     * @param $type (integer) Object type (one of Git_Repo::OBJ_COMMIT,
-+     * Git_Repo::OBJ_TREE, Git_Repo::OBJ_BLOB).
-      * @returns A new Git_Commit, GitTree or Git_Blob object respectively.
-      */
-     static public function create($repo, $type)
-     {
--        if ($type == Git::OBJ_COMMIT)
-+        if ($type == Git_Repo::OBJ_COMMIT)
-             return new Git_Commit($repo);
--        if ($type == Git::OBJ_TREE)
-+        if ($type == Git_Repo::OBJ_TREE)
-             return new GitTree($repo);
--        if ($type == Git::OBJ_BLOB)
-+        if ($type == Git_Repo::OBJ_BLOB)
-             return new Git_Blob($repo);
-         throw new Exception(sprintf('Git_Object: unhandled object type %d', $type));
-     }
-@@ -71,7 +71,7 @@ class Git_Object
-     protected function hash($data)
-     {
-         $hash = hash_init('sha1');
--        hash_update($hash, Git::getTypeName($this->type));
-+        hash_update($hash, Git_Repo::getTypeName($this->type));
-         hash_update($hash, ' ');
-         hash_update($hash, strlen($data));
-         hash_update($hash, "\0");
-@@ -83,7 +83,7 @@ class Git_Object
-      * @brief Internal constructor for use from derived classes.
-      *
-      * Never use this function except from a derived class. Use the
--     * constructor of a derived class, create() or Git::getObject() instead.
-+     * constructor of a derived class, create() or Git_Repo::getObject() instead.
-      */
-     public function __construct($repo, $type)
-     {
-@@ -145,7 +145,7 @@ class Git_Object
-         flock($f, LOCK_EX);
-         ftruncate($f, 0);
-         $data = $this->serialize();
--        $data = Git::getTypeName($this->type).' '.strlen($data)."\0".$data;
-+        $data = Git_Repo::getTypeName($this->type).' '.strlen($data)."\0".$data;
-         fwrite($f, gzcompress($data));
-         fclose($f);
-         return TRUE;
-diff --git a/lib/Git/Repo.class.php b/lib/Git/Repo.class.php
+         def clear
+-          @cache.values.each do |hash|
++          cache.values.each do |hash|
+             hash[:stmt].close
+           end
+-          @cache.clear
++          cache.clear
++        end
++
++        private
++        def cache
++          @cache[$$]
+         end
+       end
+ 
+diff --git a/activerecord/lib/active_record/connection_adapters/sqlite_adapter.rb b/activerecord/lib/active_record/connection_adapters/sqlite_adapter.rb
+index 7c7e762..1932a84 100644
+--- a/activerecord/lib/active_record/connection_adapters/sqlite_adapter.rb
++++ b/activerecord/lib/active_record/connection_adapters/sqlite_adapter.rb
+@@ -52,29 +52,33 @@ module ActiveRecord
+       class StatementPool < ConnectionAdapters::StatementPool
+         def initialize(connection, max)
+           super
+-          @cache = {}
++          @cache = Hash.new { |h,pid| h[pid] = {} }
+         end
+ 
+-        def each(&block); @cache.each(&block); end
+-        def key?(key);    @cache.key?(key); end
+-        def [](key);      @cache[key]; end
+-        def length;       @cache.length; end
++        def each(&block); cache.each(&block); end
++        def key?(key);    cache.key?(key); end
++        def [](key);      cache[key]; end
++        def length;       cache.length; end
+ 
+         def []=(sql, key)
+-          while @max <= @cache.size
+-            dealloc(@cache.shift.last[:stmt])
++          while @max <= cache.size
++            dealloc(cache.shift.last[:stmt])
+           end
+-          @cache[sql] = key
++          cache[sql] = key
+         end
+ 
+         def clear
+-          @cache.values.each do |hash|
++          cache.values.each do |hash|
+             dealloc hash[:stmt]
+           end
+-          @cache.clear
++          cache.clear
+         end
+ 
+         private
++        def cache
++          @cache[$$]
++        end
++
+         def dealloc(stmt)
+           stmt.close unless stmt.closed?
+         end
+diff --git a/activerecord/test/cases/adapters/mysql/statement_pool_test.rb b/activerecord/test/cases/adapters/mysql/statement_pool_test.rb
 new file mode 100644
-index 0000000..6c303c7
+index 0000000..83de90f
 --- /dev/null
-+++ b/lib/Git/Repo.class.php
-@@ -0,0 +1,407 @@
-+<?php
-+/*
-+ * Copyright (C) 2008, 2009 Patrik Fimml
-+ *
-+ * This file is part of glip.
-+ *
-+ * glip is free software: you can redistribute it and/or modify
-+ * it under the terms of the GNU General Public License as published by
-+ * the Free Software Foundation, either version 2 of the License, or
-+ * (at your option) any later version.
-+ *
-+ * glip is distributed in the hope that it will be useful,
-+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
-+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-+ * GNU General Public License for more details.
-+ *
-+ * You should have received a copy of the GNU General Public License
-+ * along with glip.  If not, see <http://www.gnu.org/licenses/>.
-+ */
++++ b/activerecord/test/cases/adapters/mysql/statement_pool_test.rb
+@@ -0,0 +1,23 @@
++require 'cases/helper'
 +
-+class Git_Repo
-+{
-+    public $dir;
++module ActiveRecord::ConnectionAdapters
++  class MysqlAdapter
++    class StatementPoolTest < ActiveRecord::TestCase
++      def test_cache_is_per_pid
++        return skip('must support fork') unless Process.respond_to?(:fork)
 +
-+    const OBJ_NONE = 0;
-+    const OBJ_COMMIT = 1;
-+    const OBJ_TREE = 2;
-+    const OBJ_BLOB = 3;
-+    const OBJ_TAG = 4;
-+    const OBJ_OFS_DELTA = 6;
-+    const OBJ_REF_DELTA = 7;
++        cache = StatementPool.new nil, 10
++        cache['foo'] = 'bar'
++        assert_equal 'bar', cache['foo']
 +
-+    static public function getTypeID($name)
-+    {
-+        if ($name == 'commit')
-+            return Git_Repo::OBJ_COMMIT;
-+        else if ($name == 'tree')
-+            return Git_Repo::OBJ_TREE;
-+        else if ($name == 'blob')
-+            return Git_Repo::OBJ_BLOB;
-+        else if ($name == 'tag')
-+            return Git_Repo::OBJ_TAG;
-+        throw new Exception(sprintf('Git_Repo: unknown type name: %s', $name));
-+    }
-+
-+    static public function getTypeName($type)
-+    {
-+        if ($type == Git_Repo::OBJ_COMMIT)
-+            return 'commit';
-+        else if ($type == Git_Repo::OBJ_TREE)
-+            return 'tree';
-+        else if ($type == Git_Repo::OBJ_BLOB)
-+            return 'blob';
-+        else if ($type == Git_Repo::OBJ_TAG)
-+            return 'tag';
-+        throw new Exception(sprintf('Git_Repo: no string representation of type %d', $type));
-+    }
-+
-+    public function __construct($dir)
-+    {
-+        $this->dir = realpath($dir);
-+        if ($this->dir === FALSE || !@is_dir($this->dir))
-+            throw new Exception(sprintf('Git_Repo: not a directory: %s', $dir));
-+
-+        $this->packs = array();
-+        $dh = opendir(sprintf('%s/objects/pack', $this->dir));
-+        if ($dh !== FALSE) {
-+            while (($entry = readdir($dh)) !== FALSE)
-+                if (preg_match('#^pack-([0-9a-fA-F]{40})\.idx$#', $entry, $m))
-+                    $this->packs[] = Git_Helper::sha1_bin($m[1]);
-+            closedir($dh);
-+        }
-+    }
-+
-+    /**
-+     * @brief Tries to find $object_name in the fanout table in $f at $offset.
-+     *
-+     * @returns array The range where the object can be located (first possible
-+     * location and past-the-end location)
-+     */
-+    protected function readFanout($f, $object_name, $offset)
-+    {
-+        if ($object_name{0} == "\x00")
-+        {
-+            $cur = 0;
-+            fseek($f, $offset);
-+            $after = Git_Helper::fuint32($f);
-+        }
-+        else
-+        {
-+            fseek($f, $offset + (ord($object_name{0}) - 1)*4);
-+            $cur = Git_Helper::fuint32($f);
-+            $after = Git_Helper::fuint32($f);
++        pid = fork {
++          lookup = cache['foo'];
++          exit!(!lookup)
 +        }
 +
-+        return array($cur, $after);
-+    }
++        Process.waitpid pid
++        assert $?.success?, 'process should exit successfully'
++      end
++    end
++  end
++end
+diff --git a/activerecord/test/cases/adapters/sqlite3/statement_pool_test.rb b/activerecord/test/cases/adapters/sqlite3/statement_pool_test.rb
+new file mode 100644
+index 0000000..ae272e2
+--- /dev/null
++++ b/activerecord/test/cases/adapters/sqlite3/statement_pool_test.rb
+@@ -0,0 +1,24 @@
++require 'cases/helper'
 +
-+    /**
-+     * @brief Try to find an object in a pack.
-+     *
-+     * @param $object_name (string) name of the object (binary SHA1)
-+     * @returns (array) an array consisting of the name of the pack (string) and
-+     * the byte offset inside it, or NULL if not found
-+     */
-+    protected function findPackedObject($object_name)
-+    {
-+        foreach ($this->packs as $pack_name)
-+        {
-+            $index = fopen(sprintf('%s/objects/pack/pack-%s.idx', $this->dir, Git_Helper::sha1_hex($pack_name)), 'rb');
-+            flock($index, LOCK_SH);
++module ActiveRecord::ConnectionAdapters
++  class SQLiteAdapter
++    class StatementPoolTest < ActiveRecord::TestCase
++      def test_cache_is_per_pid
++        return skip('must support fork') unless Process.respond_to?(:fork)
 +
-+            /* check version */
-+            $magic = fread($index, 4);
-+            if ($magic != "\xFFtOc")
-+            {
-+                /* version 1 */
-+                /* read corresponding fanout entry */
-+                list($cur, $after) = $this->readFanout($index, $object_name, 0);
++        cache = StatementPool.new nil, 10
++        cache['foo'] = 'bar'
++        assert_equal 'bar', cache['foo']
 +
-+                $n = $after-$cur;
-+                if ($n == 0)
-+                    continue;
-+
-+                /*
-+                 * TODO: do a binary search in [$offset, $offset+24*$n)
-+                 */
-+                fseek($index, 4*256 + 24*$cur);
-+                for ($i = 0; $i < $n; $i++)
-+                {
-+                    $off = Git_Helper::fuint32($index);
-+                    $name = fread($index, 20);
-+                    if ($name == $object_name)
-+                    {
-+                        /* we found the object */
-+                        fclose($index);
-+                        return array($pack_name, $off);
-+                    }
-+                }
-+            }
-+            else
-+            {
-+                /* version 2+ */
-+                $version = Git_Helper::fuint32($index);
-+                if ($version == 2)
-+                {
-+                    list($cur, $after) = $this->readFanout($index, $object_name, 8);
-+
-+                    if ($cur == $after)
-+                        continue;
-+
-+                    fseek($index, 8 + 4*255);
-+                    $total_objects = Git_Helper::fuint32($index);
-+
-+                    /* look up sha1 */
-+                    fseek($index, 8 + 4*256 + 20*$cur);
-+                    for ($i = $cur; $i < $after; $i++)
-+                    {
-+                        $name = fread($index, 20);
-+                        if ($name == $object_name)
-+                            break;
-+                    }
-+                    if ($i == $after)
-+                        continue;
-+
-+                    fseek($index, 8 + 4*256 + 24*$total_objects + 4*$i);
-+                    $off = Git_Helper::fuint32($index);
-+                    if ($off & 0x80000000)
-+                    {
-+                        /* packfile > 2 GB. Gee, you really want to handle this
-+                         * much data with PHP?
-+                         */
-+                        throw new Exception('Git_Repo: 64-bit packfiles offsets not implemented');
-+                    }
-+
-+                    fclose($index);
-+                    return array($pack_name, $off);
-+                }
-+                else
-+                    throw new Exception('Git_Repo: unsupported pack index format');
-+            }
-+            fclose($index);
-+        }
-+        /* not found */
-+        return NULL;
-+    }
-+
-+    /**
-+     * @brief Apply the git delta $delta to the byte sequence $base.
-+     *
-+     * @param $delta (string) the delta to apply
-+     * @param $base (string) the sequence to patch
-+     * @returns (string) the patched byte sequence
-+     */
-+    protected function applyDelta($delta, $base)
-+    {
-+        $pos = 0;
-+
-+        $base_size = Git_Helper::git_varint($delta, $pos);
-+        $result_size = Git_Helper::git_varint($delta, $pos);
-+
-+        $r = '';
-+        while ($pos < strlen($delta))
-+        {
-+            $opcode = ord($delta{$pos++});
-+            if ($opcode & 0x80)
-+            {
-+                /* copy a part of $base */
-+                $off = 0;
-+                if ($opcode & 0x01) $off = ord($delta{$pos++});
-+                if ($opcode & 0x02) $off |= ord($delta{$pos++}) <<  8;
-+                if ($opcode & 0x04) $off |= ord($delta{$pos++}) << 16;
-+                if ($opcode & 0x08) $off |= ord($delta{$pos++}) << 24;
-+                $len = 0;
-+                if ($opcode & 0x10) $len = ord($delta{$pos++});
-+                if ($opcode & 0x20) $len |= ord($delta{$pos++}) <<  8;
-+                if ($opcode & 0x40) $len |= ord($delta{$pos++}) << 16;
-+                if ($len == 0) $len = 0x10000;
-+                $r .= substr($base, $off, $len);
-+            }
-+            else
-+            {
-+                /* take the next $opcode bytes as they are */
-+                $r .= substr($delta, $pos, $opcode);
-+                $pos += $opcode;
-+            }
-+        }
-+        return $r;
-+    }
-+
-+    /**
-+     * @brief Unpack an object from a pack.
-+     *
-+     * @param $pack (resource) open .pack file
-+     * @param $object_offset (integer) offset of the object in the pack
-+     * @returns (array) an array consisting of the object type (int) and the
-+     * binary representation of the object (string)
-+     */
-+    protected function unpackObject($pack, $object_offset)
-+    {
-+        fseek($pack, $object_offset);
-+
-+        /* read object header */
-+        $c = ord(fgetc($pack));
-+        $type = ($c >> 4) & 0x07;
-+        $size = $c & 0x0F;
-+        for ($i = 4; $c & 0x80; $i += 7)
-+        {
-+            $c = ord(fgetc($pack));
-+            $size |= (($c & 0x7F) << $i);
++        pid = fork {
++          lookup = cache['foo'];
++          exit!(!lookup)
 +        }
 +
-+        /* compare sha1_file.c:1608 unpack_entry */
-+        if ($type == Git_Repo::OBJ_COMMIT || $type == Git_Repo::OBJ_TREE || $type == Git_Repo::OBJ_BLOB || $type == Git_Repo::OBJ_TAG)
-+        {
-+            /*
-+             * We don't know the actual size of the compressed
-+             * data, so we'll assume it's less than
-+             * $object_size+512.
-+             *
-+             * FIXME use PHP stream filter API as soon as it behaves
-+             * consistently
-+             */
-+            $data = gzuncompress(fread($pack, $size+512), $size);
-+        }
-+        else if ($type == Git_Repo::OBJ_OFS_DELTA)
-+        {
-+            /* 20 = maximum varint length for offset */
-+            $buf = fread($pack, $size+512+20);
++        Process.waitpid pid
++        assert $?.success?, 'process should exit successfully'
++      end
++    end
++  end
++end
 +
-+            /*
-+             * contrary to varints in other places, this one is big endian
-+             * (and 1 is added each turn)
-+             * see sha1_file.c (get_delta_base)
-+             */
-+            $pos = 0;
-+            $offset = -1;
-+            do
-+            {
-+                $offset++;
-+                $c = ord($buf{$pos++});
-+                $offset = ($offset << 7) + ($c & 0x7F);
-+            }
-+            while ($c & 0x80);
-+
-+            $delta = gzuncompress(substr($buf, $pos), $size);
-+            unset($buf);
-+
-+            $base_offset = $object_offset - $offset;
-+            assert($base_offset >= 0);
-+            list($type, $base) = $this->unpackObject($pack, $base_offset);
-+
-+            $data = $this->applyDelta($delta, $base);
-+        }
-+        else if ($type == Git_Repo::OBJ_REF_DELTA)
-+        {
-+            $base_name = fread($pack, 20);
-+            list($type, $base) = $this->getRawObject($base_name);
-+
-+            // $size is the length of the uncompressed delta
-+            $delta = gzuncompress(fread($pack, $size+512), $size);
-+
-+            $data = $this->applyDelta($delta, $base);
-+        }
-+        else
-+            throw new Exception(sprintf('Git_Repo: object of unknown type %d', $type));
-+
-+        return array($type, $data);
-+    }
-+
-+    /**
-+     * @brief Fetch an object in its binary representation by name.
-+     *
-+     * Throws an exception if the object cannot be found.
-+     *
-+     * @param $object_name (string) name of the object (binary SHA1)
-+     * @returns (array) an array consisting of the object type (int) and the
-+     * binary representation of the object (string)
-+     */
-+    protected function getRawObject($object_name)
-+    {
-+        static $cache = array();
-+        /* FIXME allow limiting the cache to a certain size */
-+
-+        if (isset($cache[$object_name]))
-+            return $cache[$object_name];
-+        $sha1 = Git_Helper::sha1_hex($object_name);
-+        $path = sprintf('%s/objects/%s/%s', $this->dir, substr($sha1, 0, 2), substr($sha1, 2));
-+        if (file_exists($path))
-+        {
-+            list($hdr, $object_data) = explode("\0", gzuncompress(file_get_contents($path)), 2);
-+
-+            sscanf($hdr, "%s %d", $type, $object_size);
-+            $object_type = Git_Repo::getTypeID($type);
-+            $r = array($object_type, $object_data);
-+        }
-+        else if ($x = $this->findPackedObject($object_name))
-+        {
-+            list($pack_name, $object_offset) = $x;
-+
-+            $pack = fopen(sprintf('%s/objects/pack/pack-%s.pack', $this->dir, Git_Helper::sha1_hex($pack_name)), 'rb');
-+            flock($pack, LOCK_SH);
-+
-+            /* check magic and version */
-+            $magic = fread($pack, 4);
-+            $version = Git_Helper::fuint32($pack);
-+            if ($magic != 'PACK' || $version != 2)
-+                throw new Exception('Git_Repo: unsupported pack format');
-+
-+            $r = $this->unpackObject($pack, $object_offset);
-+            fclose($pack);
-+        }
-+        else
-+            throw new Exception(sprintf('Git_Repo: object not found: %s', Git_Helper::sha1_hex($object_name)));
-+        $cache[$object_name] = $r;
-+        return $r;
-+    }
-+
-+    /**
-+     * @brief Fetch an object in its PHP representation.
-+     *
-+     * @param $name (string) name of the object (binary SHA1)
-+     * @returns (Git_Object) the object
-+     */
-+    public function getObject($name)
-+    {
-+        list($type, $data) = $this->getRawObject($name);
-+        $object = Git_Object::create($this, $type);
-+        $object->unserialize($data);
-+        assert($name == $object->getName());
-+        return $object;
-+    }
-+
-+    /**
-+     * @brief Look up a branch.
-+     *
-+     * @param $branch (string) The branch to look up, defaulting to @em master.
-+     * @returns (string) The tip of the branch (binary sha1).
-+     */
-+    public function getTip($branch='master')
-+    {
-+        $subpath = sprintf('refs/heads/%s', $branch);
-+        $path = sprintf('%s/%s', $this->dir, $subpath);
-+        if (file_exists($path))
-+            return Git_Helper::sha1_bin(file_get_contents($path));
-+        $path = sprintf('%s/packed-refs', $this->dir);
-+        if (file_exists($path))
-+        {
-+            $head = NULL;
-+            $f = fopen($path, 'rb');
-+            flock($f, LOCK_SH);
-+            while ($head === NULL && ($line = fgets($f)) !== FALSE)
-+            {
-+                if ($line{0} == '#')
-+                    continue;
-+                $parts = explode(' ', trim($line));
-+                if (count($parts) == 2 && $parts[1] == $subpath)
-+                    $head = Git_Helper::sha1_bin($parts[0]);
-+            }
-+            fclose($f);
-+            if ($head !== NULL)
-+                return $head;
-+        }
-+        throw new Exception(sprintf('Git_Repo: no such branch: %s', $branch));
-+    }
-+}
-+
-diff --git a/lib/Git/Tree.class.php b/lib/Git/Tree.class.php
-index 59c6d9c..c13270f 100644
---- a/lib/Git/Tree.class.php
-+++ b/lib/Git/Tree.class.php
-@@ -24,7 +24,7 @@ class Git_Tree extends Git_Object
- 
-     public function __construct($repo)
-     {
--        parent::__construct($repo, Git::OBJ_TREE);
-+        parent::__construct($repo, Git_Repo::OBJ_TREE);
-     }
- 
-     public function _unserialize($data)
