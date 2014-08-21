@@ -68,6 +68,10 @@ class GitDiffSection {
         $r = $right_line_num++;
       }
       
+      if ($m == 9) {
+        // Don't change any line counts
+      }
+      
       $ol = new GitDiffLine($line, $l, $r, $m);
       
       $obj_lines[] = $ol;
@@ -91,6 +95,11 @@ class GitDiffSection {
     // This line appears on both sides of the diff no line change
     if ($s == ' ') {
       return 0;
+    }
+    
+    // This line is a note, doesnt effect line count
+    if ($s == '\\') {
+      return 9;
     }
   }
   
