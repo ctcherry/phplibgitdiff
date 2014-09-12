@@ -23,20 +23,29 @@ class GitDiffLine {
 
 class GitDiffSection {
   
-  private $header_pattern = "/@@ -(\d+),(\d+) \+(\d+),(\d+) @@(.*)/i";
+  private $header_pattern = "/@@ -(\d+)(?:,(\d+)|) \+(\d+)(?:,(\d+)|) @@(.*)/i";
   private $diff_lines;
   
   function __construct($section_lines) {
     $this->diff_lines = $section_lines;
     $this->header = $this->diff_lines[0];
     list ($this->left_line_offset, $this->left_line_count, $this->right_line_offset, $this->right_line_count) = $this->get_metrics();
+
     $this->lines = $this->get_lines();
   }
   
   private function get_metrics() {
     preg_match($this->header_pattern, $this->header, $matches);
     array_shift($matches);
-    return $matches;
+    // Some of our matches might be empty strings, this makes them the
+    // correct default values according to http://en.wikipedia.org/wiki/Diff#Unified_format
+    $res = array_map(function($v) {
+      if ($v === '') {
+        return 1;
+      }
+      return intval($v);
+    }, $matches);
+    return $res;
   }
   
   private function get_lines() {
@@ -71,7 +80,7 @@ class GitDiffSection {
       if ($m == 9) {
         // Don't change any line counts
       }
-      
+
       $ol = new GitDiffLine($line, $l, $r, $m);
       
       $obj_lines[] = $ol;
@@ -81,6 +90,7 @@ class GitDiffSection {
   }
   
   private function line_mode($line) {
+    if (strlen($line) === 0) { return 0; }
     $s = $line[0];
     // This line does not appear on the left side of the diff, but does appear on the right, line addition
     if ($s === '+') {
@@ -96,8 +106,8 @@ class GitDiffSection {
     if ($s == ' ') {
       return 0;
     }
-    
-    // This line is a note, doesnt effect line count
+
+    // This line is a note appears as a note, doesnt effect line count
     if ($s == '\\') {
       return 9;
     }
@@ -106,15 +116,37 @@ class GitDiffSection {
 }
 
 class GitDiffFile {
-  
+ 
+  const ACTION_CHANGE = 1;
+  const ACTION_NEW = 2;
+  const ACTION_DELETE = 3;
+
   function __construct($file_lines) {
     $this->diff_lines = $file_lines;
     $this->header = $this->diff_lines[0];
     $this->file_name = $this->get_file_name();
     $this->meta = $this->diff_lines[1];
     $this->sections = $this->get_sections();
+    $this->action = null;
+    
+    if (stripos($this->meta, 'index') === 0) {
+      $this->action = 1;
+    }
+
+    if (stripos($this->meta, 'deleted file') === 0) {
+      $this->action = 2;
+    }
+
+    if (stripos($this->meta, 'new file') === 0) {
+      $this->action = 3;
+    }
+
   }
-  
+ 
+  public function get_action() {
+    return $this->action;
+  }
+ 
   private function get_file_name() {
     preg_match("#.*b/(.*)$#i", $this->header, $matches);
     return $matches[1];
@@ -141,6 +173,7 @@ class GitDiffFile {
     $obj_sections = array();
     
     foreach($sections as $section) {
+      if (count($section) == 0) { continue; }
       $obj_sections[] = new GitDiffSection($section);
     }
     
