@@ -148,7 +148,8 @@ class GitDiffFile {
   }
  
   private function get_file_name() {
-    preg_match("#.*b/(.*)$#i", $this->header, $matches);
+    // See: https://git-scm.com/docs/git-diff#_generating_patches_with_p
+    preg_match("#diff --git a\/(.*) b\/\\1$#i", $this->header, $matches);
     return $matches[1];
   }
   
